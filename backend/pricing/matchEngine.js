@@ -1,25 +1,67 @@
 /**
- * Match engine skeleton (M9.1).
+ * Match engine (M9.2).
  *
  * Purpose: groups VendorPackages into CanonicalPackages by matching on
- * (countryCode + dataGB + durationDays), creates CanonicalPackageVendorLinks,
- * and recomputes the cheapest vendor per canonical package.
+ * (countryId + dataGB + durationDays), creates CanonicalPackageVendorLinks,
+ * marks VendorPackage.isMapped = true.
  *
- * M9.1 scope: input validation + summary shape only. No DB writes yet.
- * DB writes will be added in M9.2.
+ * M9.2 scope: full DB writes for matching + linking.
+ * Does NOT calculate finalPriceINR, apply margin rules, or write PriceHistory.
  *
  * RULE: Never mix pricing logic inside route handlers.
  */
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Build the in-memory grouping key for a VendorPackage.
+ * Packages with the same key belong to the same CanonicalPackage.
+ *
+ * Key format: "<countryId>|<dataGB>|<durationDays>"
+ * Unlimited packages: "<countryId>|unlimited|<durationDays>"
+ *
+ * @param {Object} pkg - VendorPackage row
+ * @returns {string|null} key, or null if the package cannot be matched
+ */
+function buildMatchKey(pkg) {
+  if (!pkg.countryId) return null; // cannot match without a resolved country
+  const dataPart = pkg.isUnlimited ? 'unlimited' : String(pkg.dataGB ?? '');
+  if (!dataPart) return null;      // cannot match without data size
+  return `${pkg.countryId}|${dataPart}|${pkg.durationDays}`;
+}
+
+/**
+ * Build a human-readable name for a CanonicalPackage.
+ * e.g. "1.5 GB / 7 Days" or "Unlimited / 30 Days"
+ *
+ * @param {Object} pkg - VendorPackage row
+ * @returns {string}
+ */
+function buildCanonicalName(pkg) {
+  const dataPart = pkg.isUnlimited ? 'Unlimited' : `${pkg.dataGB} GB`;
+  return `${dataPart} / ${pkg.durationDays} Days`;
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+
 /**
  * Groups unmapped VendorPackages into CanonicalPackages.
  *
- * Matching key: countryCode + dataGB + durationDays
- * - Unlimited packages match on countryCode + isUnlimited + durationDays
+ * Matching key: countryId + dataGB + durationDays
+ * Unlimited packages match on countryId + isUnlimited + durationDays.
+ *
+ * If vendorPackages is not provided, loads all active unmapped VendorPackage
+ * rows from the DB (where isMapped=false AND isActive=true AND countryId IS NOT NULL).
+ *
+ * For each group:
+ *   1. Find or create a CanonicalPackage matching (countryId, dataGB, durationDays).
+ *   2. Upsert a CanonicalPackageVendorLink for each VendorPackage in the group.
+ *   3. Mark each VendorPackage.isMapped = true.
+ *
+ * Does NOT set finalPriceINR, apply margin rules, or write PriceHistory.
  *
  * @param {import('@prisma/client').PrismaClient} prisma
- * @param {Object[]} [vendorPackages] - optional pre-fetched VendorPackage rows.
- *   If omitted, the engine will query all unmapped packages from DB (M9.2).
+ * @param {Object[]} [vendorPackages] - optional pre-fetched VendorPackage rows
  * @returns {Promise<{
  *   canonicalCreated: number,
  *   linksCreated: number,
@@ -35,7 +77,7 @@ async function matchPackages(prisma, vendorPackages) {
     errors:           [],
   };
 
-  // ── Input validation ───────────────────────────────────────────────────────
+  // ── 1. Input validation ────────────────────────────────────────────────────
   if (!prisma || typeof prisma.$connect !== 'function') {
     throw new Error('matchPackages: first argument must be a PrismaClient instance');
   }
@@ -44,28 +86,131 @@ async function matchPackages(prisma, vendorPackages) {
     throw new Error('matchPackages: vendorPackages must be an array or undefined');
   }
 
-  // If an explicit array was passed, validate each item has the minimum fields
-  if (Array.isArray(vendorPackages)) {
-    for (let i = 0; i < vendorPackages.length; i++) {
-      const pkg = vendorPackages[i];
-      if (!pkg || typeof pkg !== 'object') {
-        summary.errors.push(`Item ${i}: not an object, skipped`);
-        continue;
-      }
-      if (!pkg.countryCode && !pkg.vendorCountryCode) {
-        summary.errors.push(`Item ${i} (id=${pkg.id}): missing countryCode, skipped`);
-      }
+  // ── 2. Load packages from DB if not provided ───────────────────────────────
+  let packages = vendorPackages;
+
+  if (!packages) {
+    try {
+      packages = await prisma.vendorPackage.findMany({
+        where: {
+          isMapped:  false,
+          isActive:  true,
+          countryId: { not: null },
+        },
+      });
+    } catch (err) {
+      summary.errors.push(`DB load failed: ${err.message}`);
+      return summary;
     }
   }
 
-  // ── TODO: DB work (M9.2) ───────────────────────────────────────────────────
-  // TODO: if vendorPackages is undefined, query prisma.vendorPackage.findMany({ where: { isMapped: false } })
-  // TODO: group packages by matchKey = `${countryCode}|${dataGB ?? 'unlimited'}|${durationDays}`
-  // TODO: for each group:
-  //   - prisma.canonicalPackage.upsert({ where: { matchKey }, ... }) → increment canonicalCreated
-  //   - prisma.canonicalPackageVendorLink.upsert({ ... })            → increment linksCreated
-  //   - prisma.vendorPackage.update({ where: { id }, data: { isMapped: true } }) → increment updated
-  // TODO: call recomputeCheapest(prisma) after all links are created
+  if (packages.length === 0) {
+    return summary; // nothing to do
+  }
+
+  // ── 3. Group packages by match key ────────────────────────────────────────
+  // groups: Map<matchKey, VendorPackage[]>
+  const groups = new Map();
+
+  for (const pkg of packages) {
+    const key = buildMatchKey(pkg);
+    if (!key) {
+      summary.errors.push(
+        `VendorPackage id=${pkg.id} skipped: missing countryId or dataGB`
+      );
+      continue;
+    }
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(pkg);
+  }
+
+  // ── 4. Process each group ─────────────────────────────────────────────────
+  for (const [matchKey, groupPkgs] of groups) {
+    // All packages in a group share the same countryId / dataGB / durationDays
+    const representative = groupPkgs[0];
+    const { countryId, dataGB, durationDays, isUnlimited } = representative;
+
+    // ── 4a. Find or create CanonicalPackage ──────────────────────────────────
+    let canonical;
+    try {
+      // Look for an existing canonical package with the same dimensions.
+      // CanonicalPackage has no unique matchKey column — query by fields.
+      canonical = await prisma.canonicalPackage.findFirst({
+        where: {
+          countryId,
+          dataGB:      isUnlimited ? null : dataGB,
+          durationDays,
+        },
+      });
+
+      if (!canonical) {
+        canonical = await prisma.canonicalPackage.create({
+          data: {
+            countryId,
+            name:         buildCanonicalName(representative),
+            dataGB:       isUnlimited ? 0 : dataGB,   // 0 signals unlimited (no Float null in schema)
+            durationDays,
+            // winningVendorPriceINR, finalPriceINR etc. default to 0 per schema
+          },
+        });
+        summary.canonicalCreated++;
+      }
+    } catch (err) {
+      summary.errors.push(
+        `CanonicalPackage find/create failed for key "${matchKey}": ${err.message}`
+      );
+      continue; // skip this group — don't mark packages as mapped
+    }
+
+    // ── 4b. Upsert CanonicalPackageVendorLink + mark isMapped ────────────────
+    for (const pkg of groupPkgs) {
+      // Upsert the link
+      try {
+        const result = await prisma.canonicalPackageVendorLink.upsert({
+          where: {
+            canonicalPackageId_vendorPackageId: {
+              canonicalPackageId: canonical.id,
+              vendorPackageId:    pkg.id,
+            },
+          },
+          update: {
+            vendorPriceINR: pkg.convertedPriceINR,
+            lastCheckedAt:  new Date(),
+          },
+          create: {
+            canonicalPackageId: canonical.id,
+            vendorPackageId:    pkg.id,
+            vendorPriceINR:     pkg.convertedPriceINR,
+          },
+        });
+
+        // Count as new link only if it was just created (updatedAt === createdAt heuristic
+        // is unreliable; use the fact that upsert on a new row sets isCheapest=false default)
+        // Prisma upsert doesn't tell us if it created or updated — track via a pre-check
+        // would add an extra query. Instead, always increment linksCreated for simplicity;
+        // re-runs are idempotent (upsert).
+        summary.linksCreated++;
+      } catch (err) {
+        summary.errors.push(
+          `Link upsert failed for VendorPackage id=${pkg.id}: ${err.message}`
+        );
+        continue; // don't mark this package as mapped if link failed
+      }
+
+      // Mark VendorPackage as mapped
+      try {
+        await prisma.vendorPackage.update({
+          where: { id: pkg.id },
+          data:  { isMapped: true },
+        });
+        summary.updated++;
+      } catch (err) {
+        summary.errors.push(
+          `isMapped update failed for VendorPackage id=${pkg.id}: ${err.message}`
+        );
+      }
+    }
+  }
 
   return summary;
 }
@@ -75,6 +220,8 @@ async function matchPackages(prisma, vendorPackages) {
  * Sets isCheapest=true on the winning link, false on all others.
  * Updates canonicalPackage.winningVendorPriceINR.
  *
+ * Does NOT apply margin rules or update finalPriceINR.
+ *
  * @param {import('@prisma/client').PrismaClient} prisma
  * @returns {Promise<{ updated: number, errors: string[] }>}
  */
@@ -83,14 +230,71 @@ async function recomputeCheapest(prisma) {
     throw new Error('recomputeCheapest: first argument must be a PrismaClient instance');
   }
 
-  // TODO: query all active CanonicalPackages with their vendor links
-  // TODO: for each canonical package:
-  //   - filter links where vendor.isActive AND vendorPackage.isActive AND link.isDisabledByAdmin=false
-  //   - find MIN(vendorPriceINR) among filtered links
-  //   - set isCheapest=true on winner, false on rest
-  //   - update canonicalPackage.winningVendorPriceINR = winner.vendorPriceINR
+  const result = { updated: 0, errors: [] };
 
-  return { updated: 0, errors: [] };
+  // Load all active canonical packages with their active, non-disabled links
+  let canonicals;
+  try {
+    canonicals = await prisma.canonicalPackage.findMany({
+      where: { isActive: true },
+      include: {
+        vendorLinks: {
+          where: { isDisabledByAdmin: false },
+          include: {
+            vendorPackage: {
+              include: { vendor: true },
+            },
+          },
+        },
+      },
+    });
+  } catch (err) {
+    result.errors.push(`DB load failed: ${err.message}`);
+    return result;
+  }
+
+  for (const canonical of canonicals) {
+    // Filter to links where both vendor and vendorPackage are active
+    const activeLinks = canonical.vendorLinks.filter(
+      link =>
+        link.vendorPackage?.isActive &&
+        link.vendorPackage?.vendor?.isActive
+    );
+
+    if (activeLinks.length === 0) continue;
+
+    // Find the cheapest link
+    const winner = activeLinks.reduce((best, link) =>
+      link.vendorPriceINR < best.vendorPriceINR ? link : best
+    );
+
+    // Update all links: set isCheapest=true on winner, false on rest
+    for (const link of activeLinks) {
+      try {
+        await prisma.canonicalPackageVendorLink.update({
+          where: { id: link.id },
+          data:  { isCheapest: link.id === winner.id },
+        });
+      } catch (err) {
+        result.errors.push(`Link update failed id=${link.id}: ${err.message}`);
+      }
+    }
+
+    // Update winningVendorPriceINR on the canonical package
+    try {
+      await prisma.canonicalPackage.update({
+        where: { id: canonical.id },
+        data:  { winningVendorPriceINR: winner.vendorPriceINR },
+      });
+      result.updated++;
+    } catch (err) {
+      result.errors.push(
+        `CanonicalPackage update failed id=${canonical.id}: ${err.message}`
+      );
+    }
+  }
+
+  return result;
 }
 
 module.exports = { matchPackages, recomputeCheapest };
