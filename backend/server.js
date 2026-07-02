@@ -4,11 +4,15 @@
  */
 
 require('dotenv').config();
-const express = require('express');
-const cors    = require('cors');
+const express  = require('express');
+const cors     = require('cors');
+const cron     = require('node-cron');
 
 // ── Prisma singleton (do NOT create a new PrismaClient here) ──
 const prisma = require('./models/index');
+
+// ── Jobs ────────────────────────────────────────────────────
+const { fetchAndUpdateRates } = require('./jobs/exchangeRates');
 
 const customersRouter = require('./routes/customers');
 const ordersRouter    = require('./routes/orders');
@@ -72,6 +76,27 @@ prisma.$connect()
 
     process.on('SIGINT',  () => shutdown('SIGINT',  server));
     process.on('SIGTERM', () => shutdown('SIGTERM', server));
+
+    // ── Exchange rate cron job (M6.3) ──────────────────────────────────────
+    const cronEnabled  = process.env.SYNC_CRON_ENABLED === 'true';
+    const cronSchedule = process.env.EXCHANGE_RATE_CRON || '0 */6 * * *';
+
+    if (cronEnabled) {
+      console.log(`Exchange rate cron enabled: ${cronSchedule}`);
+
+      cron.schedule(cronSchedule, async () => {
+        console.log('[exchange-rate-cron] Running exchange rate update…');
+        try {
+          const summary = await fetchAndUpdateRates(prisma);
+          console.log('[exchange-rate-cron] Done:', JSON.stringify(summary));
+        } catch (err) {
+          // Never crash the server — log and continue
+          console.error('[exchange-rate-cron] Unexpected error:', err.message);
+        }
+      });
+    } else {
+      console.log('Exchange rate cron disabled.');
+    }
   })
   .catch((err) => {
     console.error('Failed to connect to database:', err);
