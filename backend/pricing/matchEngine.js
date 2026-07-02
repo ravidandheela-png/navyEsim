@@ -131,14 +131,20 @@ async function matchPackages(prisma, vendorPackages) {
     const { countryId, dataGB, durationDays, isUnlimited } = representative;
 
     // ── 4a. Find or create CanonicalPackage ──────────────────────────────────
+    // Unlimited packages are stored with dataGB = 0 (schema uses Float, not nullable).
+    // findFirst and create must use the same value — always 0 for unlimited.
+    //
+    // WARNING: The schema has no @@unique constraint on (countryId, dataGB, durationDays).
+    // Concurrent runs of matchPackages may create duplicate CanonicalPackage rows.
+    // This is acceptable for now and will be addressed with a schema migration if needed.
+    const canonicalDataGB = isUnlimited ? 0 : dataGB;
+
     let canonical;
     try {
-      // Look for an existing canonical package with the same dimensions.
-      // CanonicalPackage has no unique matchKey column — query by fields.
       canonical = await prisma.canonicalPackage.findFirst({
         where: {
           countryId,
-          dataGB:      isUnlimited ? null : dataGB,
+          dataGB:      canonicalDataGB,
           durationDays,
         },
       });
@@ -148,7 +154,7 @@ async function matchPackages(prisma, vendorPackages) {
           data: {
             countryId,
             name:         buildCanonicalName(representative),
-            dataGB:       isUnlimited ? 0 : dataGB,   // 0 signals unlimited (no Float null in schema)
+            dataGB:       canonicalDataGB,
             durationDays,
             // winningVendorPriceINR, finalPriceINR etc. default to 0 per schema
           },
@@ -209,6 +215,15 @@ async function matchPackages(prisma, vendorPackages) {
           `isMapped update failed for VendorPackage id=${pkg.id}: ${err.message}`
         );
       }
+    }
+  }
+
+  // ── 5. Recompute cheapest vendor for all affected canonical packages ────────
+  // Always run after matching so winningVendorPriceINR is up to date.
+  const cheapestResult = await recomputeCheapest(prisma);
+  if (cheapestResult.errors.length > 0) {
+    for (const e of cheapestResult.errors) {
+      summary.errors.push(`recomputeCheapest: ${e}`);
     }
   }
 
