@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="NavyeSIM — Affordable eSIMs for travel" />
+  <title>NavyeSIM</title>
+  <style>
+    /* ── Design tokens (PROJECT_SPEC.md Section 4) ── */
+    :root {
+      --bg:       #FFFFFF;
+      --card-bg:  #F5F5F5;
+      --text:     #1A1A1A;
+      --accent:   #1B3A6B;
+      --radius-card:   8px;
+      --radius-btn:    6px;
+      --shadow-card:   0 1px 4px rgba(0,0,0,0.08);
+      --max-width:     480px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    #app {
+      max-width: var(--max-width);
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    /* ── Skeleton loader ── */
+    .skeleton {
+      background: linear-gradient(90deg, #e0e0e0 25%, #f0f0f0 50%, #e0e0e0 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.2s infinite;
+      border-radius: var(--radius-card);
+      height: 80px;
+      margin-bottom: 12px;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* ── Card ── */
+    .card {
+      background: var(--card-bg);
+      border-radius: var(--radius-card);
+      box-shadow: var(--shadow-card);
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    /* ── Button ── */
+    .btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-btn);
+      padding: 10px 20px;
+      font-size: 1rem;
+      cursor: pointer;
+      width: 100%;
+    }
+    .btn:hover { opacity: 0.9; }
+
+    /* ── Sticky footer ── */
+    #sticky-footer {
+      display: none;
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: var(--accent);
+      color: #fff;
+      padding: 14px 16px;
+      text-align: center;
+      font-size: 0.95rem;
+    }
+
+    /* ── Error banner ── */
+    #error-banner {
+      display: none;
+      background: #fff3cd;
+      border: 1px solid #ffc107;
+      border-radius: var(--radius-card);
+      padding: 12px;
+      margin-bottom: 12px;
+      color: #856404;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header style="padding: 16px 0 24px;">
+      <h1 style="color: var(--accent); font-size: 1.5rem;">NavyeSIM</h1>
+      <p style="font-size: 0.85rem; color: #666;">Affordable eSIMs for travel</p>
+    </header>
+
+    <div id="error-banner" role="alert"></div>
+
+    <!-- STEP 1: Country Selection -->
+    <section id="step-country">
+      <!-- TODO: render geolocation prompt or search input -->
+      <!-- TODO: fetch GET /api/countries → cache in sessionStorage 60min -->
+      <!-- TODO: filter client-side, show max 5 results dropdown -->
+    </section>
+
+    <!-- STEP 2: Package Selection (hidden until country selected) -->
+    <section id="step-packages" style="display:none;">
+      <!-- TODO: fetch GET /api/packages?countryId=X once on country confirm -->
+      <!-- TODO: two tabs: "By Data" | "By Duration" — filter/sort client-side -->
+      <!-- TODO: CSS skeleton loader while fetching -->
+      <!-- TODO: package cards with Select button -->
+    </section>
+
+    <!-- STEP 3: Payment (hidden until package selected) -->
+    <section id="step-payment" style="display:none;">
+      <!-- TODO: POST /api/orders → get orderId -->
+      <!-- TODO: Google Pay button stub (TODO[INTEGRATION]: Google Pay JS SDK) -->
+      <!-- TODO: UPI QR from GET /api/settings/payment -->
+      <!-- TODO: poll GET /api/orders/:id every 3s, max 20 attempts -->
+      <!-- TODO: on paid: lazy-load qrcode.js, render eSIM QR -->
+    </section>
+  </div>
+
+  <!-- Sticky footer: shown when package selected -->
+  <div id="sticky-footer"></div>
+
+  <script>
+    // ── NavyeSIM Customer App ──────────────────────────────────────
+    // TODO: implement Step 1 — country selection with geolocation + search
+    // TODO: implement Step 2 — package listing with tabs + skeleton
+    // TODO: implement Step 3 — payment flow + polling + QR display
+    // TODO: implement error handling (offline, polling timeout)
+    // NOTE: qrcode.js loaded lazily from CDN only when eSIM QR needed
+    // NOTE: zero external resources on initial load — system fonts only
+  </script>
+</body>
+</html>

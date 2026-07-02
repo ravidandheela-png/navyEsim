@@ -1,0 +1,29 @@
+# Environment files — never commit real secrets
+.env
+backend/.env
+**/.env
+
+# Node modules
+node_modules/
+backend/node_modules/
+admin/node_modules/
+
+# Build output
+dist/
+build/
+admin/dist/
+
+# Logs
+*.log
+backend/logfile
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Prisma generated client (regenerated via prisma generate)
+backend/node_modules/.prisma/
+
+# Uploaded files
+backend/uploads/vendor-sheets/*
+!backend/uploads/vendor-sheets/.gitkeep

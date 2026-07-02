@@ -1,0 +1,289 @@
+// NavyeSIM Prisma Schema
+// Matches PROJECT_SPEC.md Section 3 exactly.
+//
+// MONEY STORAGE CONTRACT
+// ──────────────────────
+// All INR values are stored as integers in PAISE (1 INR = 100 paise).
+//   e.g. ₹83.50 is stored as 8350
+//
+// originalPrice (vendor currency) is stored as integers in the SMALLEST UNIT
+// of that currency (minor unit), i.e. the subunit with no further subdivision:
+//   USD → cents        (1 USD = 100 cents,  $8.50 stored as 850)
+//   EUR → cents        (1 EUR = 100 cents,  €5.00 stored as 500)
+//   HKD → cents        (1 HKD = 100 cents,  HK$65 stored as 6500)
+//   GBP → pence        (1 GBP = 100 pence,  £7.20 stored as 720)
+//   SGD → cents        (1 SGD = 100 cents,  S$9.00 stored as 900)
+//   AED → fils         (1 AED = 100 fils,   30 AED stored as 3000)
+//   JPY → yen          (JPY has NO subunit — store as-is, multiply by 1)
+//   AUD → cents        (1 AUD = 100 cents,  A$12 stored as 1200)
+//   CAD → cents        (1 CAD = 100 cents,  C$10 stored as 1000)
+//
+// Conversion formula stored in convertedPriceINR:
+//   convertedPriceINR (paise) = (originalPrice_minor / 100) × toINR × 100
+//   Simplified:                = originalPrice_minor × toINR
+//   Exception for JPY:         = originalPrice_yen × toINR × 100
+//     (because JPY has no subunit, toINR is already per whole yen)
+//
+// Non-money decimals (exchange rates, margin %, dataGB) correctly use Float.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Country
+// ─────────────────────────────────────────────────────────────────────────────
+model Country {
+  id                String             @id @default(cuid())
+  name              String
+  isoCode           String             @unique
+  flagEmoji         String
+  isActive          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+
+  vendorPackages    VendorPackage[]
+  canonicalPackages CanonicalPackage[]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Vendor
+// ─────────────────────────────────────────────────────────────────────────────
+model Vendor {
+  id                 String          @id @default(cuid())
+  name               String
+  slug               String          @unique
+  sourceType         String          // "api" | "sheet"
+  apiBaseUrl         String?
+  apiKey             String?         // AES-256 encrypted at rest
+  apiAuthType        String?         // "bearer" | "apikey_header" | "basic" | "query_param"
+  apiAuthHeaderName  String?
+  columnMappingJson  String?         // JSON field map config for sheet vendors
+  syncFrequencyHours Int             @default(0) // 0 = manual only
+  isActive           Boolean         @default(true)
+  lastSyncedAt       DateTime?
+  syncStatus         String          @default("idle") // "idle" | "syncing" | "success" | "error"
+  syncErrorMessage   String?
+  createdAt          DateTime        @default(now())
+
+  vendorPackages     VendorPackage[]
+  syncLogs           SyncLog[]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VendorPackage
+// ─────────────────────────────────────────────────────────────────────────────
+model VendorPackage {
+  id                String                       @id @default(cuid())
+  vendorId          String
+  countryId         String?
+  vendorPackageId   String                       // vendor's own ID for this package
+  vendorCountryCode String                       // raw country value from vendor before mapping
+  name              String
+  dataGB            Float                        // data size in GB (decimal allowed, e.g. 1.5)
+  durationDays      Int
+  originalPrice     Int                          // vendor price in the MINOR UNIT of originalCurrency
+                                                 // (cents for USD/EUR/HKD/GBP/SGD/AUD/CAD, fils for AED,
+                                                 //  whole yen for JPY — see MONEY STORAGE CONTRACT above)
+  originalCurrency  String                       // ISO 4217 currency code: "USD", "EUR", "HKD", "GBP", "SGD", "AED", "JPY", "AUD", "CAD"
+  convertedPriceINR Int                          // originalPrice converted to paise at sync time
+                                                 // formula: originalPrice × toINR  (for 100-subunit currencies)
+                                                 //          originalPrice × toINR × 100  (for JPY, no subunit)
+  rawPayload        String                       // full vendor response stored as JSON string
+  isActive          Boolean                      @default(true)
+  isMapped          Boolean                      @default(false)
+  sourceFile        String?                      // filename if from sheet upload, null if API
+  lastSeenAt        DateTime                     @default(now())
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
+
+  vendor            Vendor                       @relation(fields: [vendorId], references: [id])
+  country           Country?                     @relation(fields: [countryId], references: [id])
+  vendorLinks       CanonicalPackageVendorLink[]
+
+  // Unique constraint: one vendor cannot have duplicate package IDs
+  @@unique([vendorId, vendorPackageId])
+
+  // Indexes for common query patterns
+  @@index([vendorId, isActive])
+  @@index([countryId, isActive])
+  @@index([isMapped])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CanonicalPackage
+// ─────────────────────────────────────────────────────────────────────────────
+model CanonicalPackage {
+  id                    String                       @id @default(cuid())
+  countryId             String
+  name                  String
+  dataGB                Float                        // data size in GB (decimal allowed)
+  durationDays          Int
+  winningVendorPriceINR Int                          @default(0) // cheapest vendor price in paise
+  marginRuleId          String?                      // which rule was applied
+  marginPercent         Float                        @default(0) // percentage, not money — Float is correct
+  marginAmountINR       Int                          @default(0) // profit in paise (admin only, never sent to customer)
+  finalPriceINR         Int                          @default(0) // computed customer price in paise
+  manualPriceOverride   Boolean                      @default(false)
+  manualPriceINR        Int?                         // if override active, use this (paise)
+  manualOverrideReason  String?
+  badge                 String?                      // optional: "Best Value", "Popular" etc.
+  isActive              Boolean                      @default(true)
+  sortOrder             Int                          @default(0)
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+
+  country               Country                      @relation(fields: [countryId], references: [id])
+  // Relation: which margin rule was applied to compute this package's price
+  appliedMarginRule     MarginRule?                  @relation("AppliedRule", fields: [marginRuleId], references: [id])
+  vendorLinks           CanonicalPackageVendorLink[]
+  orders                Order[]
+  priceHistory          PriceHistory[]
+
+  // Index for customer-facing package listing (most common query)
+  @@index([countryId, isActive])
+  @@index([isActive, sortOrder])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CanonicalPackageVendorLink
+// ─────────────────────────────────────────────────────────────────────────────
+model CanonicalPackageVendorLink {
+  id                 String           @id @default(cuid())
+  canonicalPackageId String
+  vendorPackageId    String
+  vendorPriceINR     Int              // convertedPriceINR at time of link (paise)
+  isCheapest         Boolean          @default(false) // recomputed every sync
+  isDisabledByAdmin  Boolean          @default(false) // admin can exclude vendor from competing
+  lastCheckedAt      DateTime         @default(now())
+
+  canonicalPackage   CanonicalPackage @relation(fields: [canonicalPackageId], references: [id])
+  vendorPackage      VendorPackage    @relation(fields: [vendorPackageId], references: [id])
+
+  // Unique constraint: one vendor package can only link to a canonical package once
+  @@unique([canonicalPackageId, vendorPackageId])
+
+  // Index for cheapest-vendor recomputation (runs after every sync)
+  @@index([canonicalPackageId, isCheapest])
+  @@index([canonicalPackageId, isDisabledByAdmin])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MarginRule
+// ─────────────────────────────────────────────────────────────────────────────
+model MarginRule {
+  id                 String             @id @default(cuid())
+  name               String
+  priority           Int
+  ruleType           String             // "price_range" | "package_specific" | "global"
+  priceMinINR        Int?               // lower bound in paise (for price_range rules)
+  priceMaxINR        Int?               // upper bound in paise (for price_range rules)
+  canonicalPackageId String?            // target package (for package_specific rules only)
+  marginPercent      Float              // percentage — Float is correct (e.g. 8.5%)
+  roundingRule       String             @default("none") // "none" | "round_up_9" | "ceil_hundred"
+  isActive           Boolean            @default(true)
+  createdAt          DateTime           @default(now())
+
+  // Packages that currently have this rule applied (via CanonicalPackage.marginRuleId)
+  appliedToPackages  CanonicalPackage[] @relation("AppliedRule")
+  priceHistory       PriceHistory[]
+
+  @@index([isActive, priority])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Order
+// ─────────────────────────────────────────────────────────────────────────────
+model Order {
+  id                 String           @id @default(cuid())
+  canonicalPackageId String
+  customerEmail      String?
+  paymentMethod      String           // "googlepay" | "upi" | "qr"
+  paymentStatus      String           @default("pending") // "pending" | "paid" | "failed"
+  paymentReference   String?
+  esimQrData         String?          // eSIM QR string, set after payment confirmed
+  totalINR           Int              // final price charged in paise
+  createdAt          DateTime         @default(now())
+
+  canonicalPackage   CanonicalPackage @relation(fields: [canonicalPackageId], references: [id])
+
+  @@index([paymentStatus])
+  @@index([canonicalPackageId])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExchangeRate
+// ─────────────────────────────────────────────────────────────────────────────
+model ExchangeRate {
+  id           String   @id @default(cuid())
+  fromCurrency String   @unique
+  toINR        Float    // exchange rate: 1 unit of fromCurrency = toINR rupees (Float is correct)
+  source       String   // "frankfurter" | "manual"
+  isPinned     Boolean  @default(false) // if true, auto-sync will NOT overwrite
+  fetchedAt    DateTime @default(now())
+  appliedAt    DateTime @default(now())
+  updatedBy    String   // "auto_cron" | "admin_manual"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PriceHistory
+// ─────────────────────────────────────────────────────────────────────────────
+model PriceHistory {
+  id                 String           @id @default(cuid())
+  canonicalPackageId String
+  oldPriceINR        Int              // paise
+  newPriceINR        Int              // paise
+  vendorPriceINR     Int              // paise
+  exchangeRateUsed   Float            // exchange rate at time of change (Float is correct)
+  marginRuleId       String?
+  marginPercent      Float            // percentage at time of change (Float is correct)
+  marginAmountINR    Int              // paise
+  wasManualOverride  Boolean          @default(false)
+  overrideReason     String?
+  reason             String           // "sync" | "exchange_rate_update" | "rule_change" | "manual"
+  triggeredBy        String
+  createdAt          DateTime         @default(now())
+
+  canonicalPackage   CanonicalPackage @relation(fields: [canonicalPackageId], references: [id])
+  marginRule         MarginRule?      @relation(fields: [marginRuleId], references: [id])
+
+  // Index for price history timeline queries (admin package detail view)
+  @@index([canonicalPackageId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SyncLog
+// ─────────────────────────────────────────────────────────────────────────────
+model SyncLog {
+  id               String    @id @default(cuid())
+  vendorId         String
+  startedAt        DateTime  @default(now())
+  finishedAt       DateTime?
+  packagesAdded    Int       @default(0)
+  packagesUpdated  Int       @default(0)
+  packagesStale    Int       @default(0)
+  packagesUnmapped Int       @default(0)
+  errorCount       Int       @default(0)
+  errorDetails     String?
+  status           String    // "success" | "partial" | "failed"
+
+  vendor           Vendor    @relation(fields: [vendorId], references: [id])
+
+  // Index for fetching last N sync logs per vendor (admin vendor detail page)
+  @@index([vendorId, startedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin
+// ─────────────────────────────────────────────────────────────────────────────
+model Admin {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
