@@ -78,15 +78,19 @@ function applyRounding(rawPriceINR, roundingRule) {
 function selectRule(vendorPriceINR, rules, canonicalPackageId) {
   if (!Array.isArray(rules) || rules.length === 0) return null;
 
-  // 1. package_specific
+  // 1. package_specific — sort by priority ascending so the highest-priority rule wins
+  //    when multiple package_specific rules exist for the same canonicalPackageId.
   if (canonicalPackageId) {
-    const specific = rules.find(
-      r => r.ruleType === 'package_specific' && r.canonicalPackageId === canonicalPackageId
-    );
-    if (specific) return specific;
+    const specificRules = rules
+      .filter(r => r.ruleType === 'package_specific' && r.canonicalPackageId === canonicalPackageId)
+      .sort((a, b) => a.priority - b.priority);
+    if (specificRules.length > 0) return specificRules[0];
   }
 
-  // 2. price_range — sort by priority ascending, pick first that matches
+  // 2. price_range — sort by priority ascending, pick first that matches.
+  //    NOTE: overlapping price ranges with the same priority value produce
+  //    non-deterministic results. This is a data-quality / admin-validation issue
+  //    and should be prevented at the admin UI level.
   const rangeRules = rules
     .filter(r => r.ruleType === 'price_range')
     .sort((a, b) => a.priority - b.priority);
@@ -154,12 +158,20 @@ function applyMarginRule(vendorPriceINR, rules, canonicalPackageId = null) {
     );
   }
 
-  // ── 3. Compute margin ──────────────────────────────────────────────────────
+  // ── 3. Validate matched rule ───────────────────────────────────────────────
+  if (typeof rule.marginPercent !== 'number' || rule.marginPercent < 0) {
+    throw new Error(
+      `applyMarginRule: matched rule "${rule.id}" has invalid marginPercent=${rule.marginPercent}. ` +
+      `marginPercent must be a non-negative number.`
+    );
+  }
+
+  // ── 4. Compute margin ──────────────────────────────────────────────────────
   const marginPercent   = rule.marginPercent;                              // e.g. 8.5
   const marginAmountINR = Math.round(vendorPriceINR * (marginPercent / 100)); // paise, integer
   const rawFinalINR     = vendorPriceINR + marginAmountINR;                // paise, before rounding
 
-  // ── 4. Apply rounding ──────────────────────────────────────────────────────
+  // ── 5. Apply rounding ──────────────────────────────────────────────────────
   const finalPriceINR = applyRounding(rawFinalINR, rule.roundingRule || 'none');
 
   return {
