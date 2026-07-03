@@ -183,6 +183,103 @@ function applyMarginRule(vendorPriceINR, rules, canonicalPackageId = null) {
   };
 }
 
+// ── Batch repricing ───────────────────────────────────────────────────────────
+
+/**
+ * Reprices all active CanonicalPackages using the current margin rules.
+ *
+ * For each package:
+ *   1. Calls applyMarginRule(winningVendorPriceINR, rules, package.id)
+ *   2. Updates: marginRuleId, marginPercent, marginAmountINR, finalPriceINR
+ *   3. If manualPriceOverride=true, keeps finalPriceINR = manualPriceINR
+ *      but still stores the computed margin fields (for audit visibility).
+ *
+ * Does NOT write PriceHistory (that is M10.3).
+ *
+ * @param {import('@prisma/client').PrismaClient} prisma
+ * @returns {Promise<{
+ *   processed: number,
+ *   updated:   number,
+ *   skipped:   number,
+ *   errors:    string[]
+ * }>}
+ */
+async function repriceCanonicalPackages(prisma) {
+  if (!prisma || typeof prisma.$connect !== 'function') {
+    throw new Error('repriceCanonicalPackages: first argument must be a PrismaClient instance');
+  }
+
+  const summary = { processed: 0, updated: 0, skipped: 0, errors: [] };
+
+  // ── 1. Load active CanonicalPackages with a known vendor price ─────────────
+  let packages;
+  try {
+    packages = await prisma.canonicalPackage.findMany({
+      where: {
+        isActive:             true,
+        winningVendorPriceINR: { gt: 0 },
+      },
+    });
+  } catch (err) {
+    summary.errors.push(`DB load (canonicalPackage) failed: ${err.message}`);
+    return summary;
+  }
+
+  if (packages.length === 0) return summary;
+
+  // ── 2. Load active MarginRule rows ordered by priority ascending ───────────
+  let rules;
+  try {
+    rules = await prisma.marginRule.findMany({
+      where:   { isActive: true },
+      orderBy: { priority: 'asc' },
+    });
+  } catch (err) {
+    summary.errors.push(`DB load (marginRule) failed: ${err.message}`);
+    return summary;
+  }
+
+  // ── 3. Reprice each package ────────────────────────────────────────────────
+  for (const pkg of packages) {
+    summary.processed++;
+
+    // Compute margin using the engine (pure, no DB)
+    let result;
+    try {
+      result = applyMarginRule(pkg.winningVendorPriceINR, rules, pkg.id);
+    } catch (err) {
+      summary.errors.push(`Package id=${pkg.id}: applyMarginRule failed — ${err.message}`);
+      summary.skipped++;
+      continue;
+    }
+
+    // If manualPriceOverride is active, keep finalPriceINR = manualPriceINR
+    // but still persist the computed margin fields for audit visibility.
+    const finalPriceINR = pkg.manualPriceOverride && pkg.manualPriceINR != null
+      ? pkg.manualPriceINR
+      : result.finalPriceINR;
+
+    // Persist computed fields
+    try {
+      await prisma.canonicalPackage.update({
+        where: { id: pkg.id },
+        data: {
+          marginRuleId:    result.rule.id,
+          marginPercent:   result.marginPercent,
+          marginAmountINR: result.marginAmountINR,
+          finalPriceINR,
+        },
+      });
+      summary.updated++;
+    } catch (err) {
+      summary.errors.push(`Package id=${pkg.id}: DB update failed — ${err.message}`);
+      summary.skipped++;
+    }
+  }
+
+  return summary;
+}
+
 // ── Legacy export (kept for backward compatibility) ───────────────────────────
 
 /**
@@ -193,4 +290,4 @@ function applyMargin(winningVendorPriceINR, canonicalPackageId, rules) {
   return applyMarginRule(winningVendorPriceINR, rules, canonicalPackageId);
 }
 
-module.exports = { applyMarginRule, applyRounding, applyMargin };
+module.exports = { applyMarginRule, applyRounding, applyMargin, repriceCanonicalPackages };
