@@ -1,11 +1,9 @@
 const { Router } = require('express');
 const router = Router();
+const paymentController = require('../controllers/paymentController');
 
-// POST /api/payments/webhook → stub: validates secret header, marks order paid
+// POST /api/payments/webhook
 // TODO[INTEGRATION]: add provider signature verification (Razorpay / PhonePe)
-router.post('/webhook', (req, res, next) => {
-  // TODO: implement via paymentController.handleWebhook
-  next();
-});
+router.post('/webhook', paymentController.handleWebhook);
 
 module.exports = router;

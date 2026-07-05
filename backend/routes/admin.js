@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const router = Router();
 const auth = require('../middleware/auth');
+const { upload, handleUploadError } = require('../middleware/upload');
 const adminController = require('../controllers/adminController');
 
 // POST /api/admin/login (no auth required)
@@ -10,50 +11,49 @@ router.post('/login', adminController.login);
 router.use(auth);
 
 // GET /api/admin/dashboard
-router.get('/dashboard', (req, res, next) => {
-  // TODO: implement via adminController.getDashboard
-  next();
-});
+router.get('/dashboard', adminController.getDashboard);
 
-// CRUD /api/admin/countries
-router.get('/countries', (req, res, next) => { next(); });
-router.post('/countries', (req, res, next) => { next(); });
-router.put('/countries/:id', (req, res, next) => { next(); });
-router.delete('/countries/:id', (req, res, next) => { next(); });
+// ── M12 Countries ──────────────────────────────────────────────────────────
+router.get('/countries',      adminController.getCountries);
+router.post('/countries',     adminController.createCountry);
+router.put('/countries/:id',  adminController.updateCountry);
+router.delete('/countries/:id', adminController.deleteCountry);
 
-// CRUD /api/admin/vendors
-router.get('/vendors', (req, res, next) => { next(); });
-router.post('/vendors', (req, res, next) => { next(); });
-router.put('/vendors/:id', (req, res, next) => { next(); });
-router.delete('/vendors/:id', (req, res, next) => { next(); });
-router.post('/vendors/:id/sync', (req, res, next) => { next(); });
-router.post('/vendors/:id/upload', (req, res, next) => { next(); });
-router.get('/vendors/:id/synclogs', (req, res, next) => { next(); });
+// ── M13 Vendors ────────────────────────────────────────────────────────────
+router.get('/vendors',                    adminController.getVendors);
+router.post('/vendors',                   adminController.createVendor);
+router.put('/vendors/:id',                adminController.updateVendor);
+router.delete('/vendors/:id',             adminController.deleteVendor);
+router.post('/vendors/:id/sync',          adminController.syncVendor);
+router.post('/vendors/:id/upload',        upload.single('file'), handleUploadError, adminController.uploadVendorSheet);
+router.get('/vendors/:id/synclogs',       adminController.getVendorSyncLogs);
 
-// CRUD /api/admin/packages
-router.get('/packages', (req, res, next) => { next(); });
-router.post('/packages', (req, res, next) => { next(); });
-router.put('/packages/:id', (req, res, next) => { next(); });
-router.delete('/packages/:id', (req, res, next) => { next(); });
-router.get('/packages/unmatched', (req, res, next) => { next(); });
-router.post('/packages/rematch', (req, res, next) => { next(); });
-router.post('/packages/reprice', (req, res, next) => { next(); });
-router.put('/packages/:id/price', (req, res, next) => { next(); });
-router.put('/packages/:id/vendor-link/:linkId', (req, res, next) => { next(); });
+// ── M14 Packages ───────────────────────────────────────────────────────────
+// Note: /packages/unmatched and /packages/rematch must come BEFORE /packages/:id
+router.get('/packages/unmatched',         adminController.getUnmatchedPackages);
+router.post('/packages/rematch',          adminController.rematchPackages);
+router.post('/packages/reprice',          adminController.repricePackages);
+router.get('/packages',                   adminController.getPackages);
+router.post('/packages',                  adminController.createPackage);
+router.put('/packages/:id',               adminController.updatePackage);
+router.delete('/packages/:id',            adminController.deletePackage);
+router.put('/packages/:id/price',         adminController.overridePackagePrice);
+router.put('/packages/:id/vendor-link/:linkId', adminController.updateVendorLink);
 
-// CRUD /api/admin/margin-rules
-router.get('/margin-rules', (req, res, next) => { next(); });
-router.post('/margin-rules', (req, res, next) => { next(); });
-router.put('/margin-rules/:id', (req, res, next) => { next(); });
-router.delete('/margin-rules/:id', (req, res, next) => { next(); });
-router.post('/margin-rules/preview', (req, res, next) => { next(); });
+// ── M15 Margin Rules ───────────────────────────────────────────────────────
+// Note: /margin-rules/preview must come BEFORE /margin-rules/:id
+router.post('/margin-rules/preview',      adminController.previewMarginRules);
+router.get('/margin-rules',               adminController.getMarginRules);
+router.post('/margin-rules',              adminController.createMarginRule);
+router.put('/margin-rules/:id',           adminController.updateMarginRule);
+router.delete('/margin-rules/:id',        adminController.deleteMarginRule);
 
-// Orders
-router.get('/orders', (req, res, next) => { next(); });
-router.get('/orders/:id', (req, res, next) => { next(); });
-router.put('/orders/:id', (req, res, next) => { next(); });
+// ── M16 Orders ─────────────────────────────────────────────────────────────
+router.get('/orders',                     adminController.getOrders);
+router.get('/orders/:id',                 adminController.getOrderById);
+router.put('/orders/:id',                 adminController.updateOrder);
 
-// Price history
-router.get('/price-history/:canonicalPackageId', (req, res, next) => { next(); });
+// ── Price history ──────────────────────────────────────────────────────────
+router.get('/price-history/:canonicalPackageId', adminController.getPriceHistory);
 
 module.exports = router;
