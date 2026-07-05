@@ -23,17 +23,17 @@ function Placeholder({ title }) {
 }
 
 /** Render the active page component */
-function PageContent({ page, onNavigate }) {
+function PageContent({ page, onNavigate, pageData }) {
   switch (page) {
-    case 'dashboard':   return <Dashboard onNavigate={onNavigate} />;
-    case 'countries':   return <Countries />;
-    case 'vendors':     return <Vendors onNavigate={onNavigate} />;
-    case 'vendor-detail': return <VendorDetail onNavigate={onNavigate} />;
-    case 'packages':    return <Packages />;
-    case 'margin-rules': return <MarginRules />;
-    case 'orders':      return <Orders />;
-    case 'settings':    return <Settings />;
-    default:            return <Placeholder title={page} />;
+    case 'dashboard':     return <Dashboard onNavigate={onNavigate} />;
+    case 'countries':     return <Countries />;
+    case 'vendors':       return <Vendors onNavigate={onNavigate} />;
+    case 'vendor-detail': return <VendorDetail vendor={pageData} onNavigate={onNavigate} />;
+    case 'packages':      return <Packages />;
+    case 'margin-rules':  return <MarginRules />;
+    case 'orders':        return <Orders />;
+    case 'settings':      return <Settings />;
+    default:              return <Placeholder title={page} />;
   }
 }
 
@@ -55,15 +55,24 @@ function PageContent({ page, onNavigate }) {
 export default function App() {
   const [token,      setToken]      = useState(() => localStorage.getItem(TOKEN_KEY));
   const [activePage, setActivePage] = useState('dashboard');
+  const [pageData,   setPageData]   = useState(null);  // extra data passed to page (e.g. vendor object)
 
   const handleLogin = (jwt) => {
     setToken(jwt);
     setActivePage('dashboard');
+    setPageData(null);
   };
 
   const handleLogout = () => {
     setToken(null);
     setActivePage('dashboard');
+    setPageData(null);
+  };
+
+  // onNavigate(page, data?) — data is passed as prop to the page component
+  const handleNavigate = (page, data = null) => {
+    setActivePage(page);
+    setPageData(data);
   };
 
   // ── Not authenticated → show Login ─────────────────────────────────────────
@@ -76,11 +85,11 @@ export default function App() {
     <div className="flex min-h-screen bg-gray-50">
       <Sidebar
         activePage={activePage}
-        onNavigate={setActivePage}
+        onNavigate={handleNavigate}
         onLogout={handleLogout}
       />
       <main className="flex-1 p-6 overflow-auto">
-        <PageContent page={activePage} onNavigate={setActivePage} />
+        <PageContent page={activePage} onNavigate={handleNavigate} pageData={pageData} />
       </main>
     </div>
   );
