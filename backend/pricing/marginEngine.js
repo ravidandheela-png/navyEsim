@@ -1,14 +1,15 @@
 /**
- * Margin engine (M10.1).
+ * Margin engine (M10.1 / M10.2 / M10.3).
  *
  * Applies margin rules to a vendor price and returns the final customer price.
+ * Batch-reprices all active CanonicalPackages and writes PriceHistory on change.
  *
  * RULES:
  *   - All money values are integers in PAISE (1 INR = 100 paise).
  *   - Never mix pricing logic inside route handlers.
- *   - Always log price changes to PriceHistory with a reason (done by caller).
+ *   - PriceHistory is only written when finalPriceINR actually changes.
  *
- * No Prisma. No DB writes. Pure computation.
+ * No Prisma in pure-computation functions. Prisma only in batch functions.
  */
 
 // ── Rounding ──────────────────────────────────────────────────────────────────
@@ -183,40 +184,54 @@ function applyMarginRule(vendorPriceINR, rules, canonicalPackageId = null) {
   };
 }
 
-// ── Batch repricing ───────────────────────────────────────────────────────────
+// ── Batch repricing (M10.2 / M10.3) ──────────────────────────────────────────
 
 /**
  * Reprices all active CanonicalPackages using the current margin rules.
+ * Writes PriceHistory when the final customer price changes (M10.3).
  *
  * For each package:
  *   1. Calls applyMarginRule(winningVendorPriceINR, rules, package.id)
  *   2. Updates: marginRuleId, marginPercent, marginAmountINR, finalPriceINR
  *   3. If manualPriceOverride=true, keeps finalPriceINR = manualPriceINR
  *      but still stores the computed margin fields (for audit visibility).
- *
- * Does NOT write PriceHistory (that is M10.3).
+ *   4. Writes PriceHistory only if finalPriceINR changed.
  *
  * @param {import('@prisma/client').PrismaClient} prisma
+ * @param {{
+ *   reason?:      string,   — default "sync"
+ *   triggeredBy?: string    — default "system"
+ * }} [options={}]
  * @returns {Promise<{
- *   processed: number,
- *   updated:   number,
- *   skipped:   number,
- *   errors:    string[]
+ *   processed:     number,
+ *   updated:       number,
+ *   skipped:       number,
+ *   priceHistoryWritten: number,
+ *   errors:        string[]
  * }>}
  */
-async function repriceCanonicalPackages(prisma) {
+async function repriceCanonicalPackages(prisma, options = {}) {
   if (!prisma || typeof prisma.$connect !== 'function') {
     throw new Error('repriceCanonicalPackages: first argument must be a PrismaClient instance');
   }
 
-  const summary = { processed: 0, updated: 0, skipped: 0, errors: [] };
+  const reason      = options.reason      || 'sync';
+  const triggeredBy = options.triggeredBy || 'system';
+
+  const summary = {
+    processed:           0,
+    updated:             0,
+    skipped:             0,
+    priceHistoryWritten: 0,
+    errors:              [],
+  };
 
   // ── 1. Load active CanonicalPackages with a known vendor price ─────────────
   let packages;
   try {
     packages = await prisma.canonicalPackage.findMany({
       where: {
-        isActive:             true,
+        isActive:              true,
         winningVendorPriceINR: { gt: 0 },
       },
     });
@@ -255,9 +270,11 @@ async function repriceCanonicalPackages(prisma) {
 
     // If manualPriceOverride is active, keep finalPriceINR = manualPriceINR
     // but still persist the computed margin fields for audit visibility.
-    const finalPriceINR = pkg.manualPriceOverride && pkg.manualPriceINR != null
-      ? pkg.manualPriceINR
-      : result.finalPriceINR;
+    const isManualOverride = pkg.manualPriceOverride && pkg.manualPriceINR != null;
+    const finalPriceINR    = isManualOverride ? pkg.manualPriceINR : result.finalPriceINR;
+
+    // Capture old price before update (for PriceHistory)
+    const oldPriceINR = pkg.finalPriceINR;
 
     // Persist computed fields
     try {
@@ -274,6 +291,33 @@ async function repriceCanonicalPackages(prisma) {
     } catch (err) {
       summary.errors.push(`Package id=${pkg.id}: DB update failed — ${err.message}`);
       summary.skipped++;
+      continue;
+    }
+
+    // ── 4. Write PriceHistory only if finalPriceINR changed ─────────────────
+    if (finalPriceINR !== oldPriceINR) {
+      try {
+        await prisma.priceHistory.create({
+          data: {
+            canonicalPackageId: pkg.id,
+            oldPriceINR,
+            newPriceINR:        finalPriceINR,
+            vendorPriceINR:     pkg.winningVendorPriceINR,
+            exchangeRateUsed:   pkg.exchangeRateUsed ?? 0,  // 0 = not available; caller may pass via options
+            marginRuleId:       result.rule.id,
+            marginPercent:      result.marginPercent,
+            marginAmountINR:    result.marginAmountINR,
+            wasManualOverride:  isManualOverride,
+            overrideReason:     isManualOverride ? (pkg.manualOverrideReason ?? null) : null,
+            reason,
+            triggeredBy,
+          },
+        });
+        summary.priceHistoryWritten++;
+      } catch (err) {
+        // PriceHistory failure is non-fatal — package was already updated
+        summary.errors.push(`Package id=${pkg.id}: PriceHistory write failed — ${err.message}`);
+      }
     }
   }
 
