@@ -4,6 +4,7 @@
  */
 
 require('dotenv').config();
+const path     = require('path');
 const express  = require('express');
 const cors     = require('cors');
 const cron     = require('node-cron');
@@ -36,6 +37,11 @@ app.use(cors({
 app.use(express.json());
 
 
+
+// ── Serve customer frontend ──────────────────────────────────
+const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
+app.use(express.static(FRONTEND_DIR));
+app.get('/', (req, res) => res.sendFile(path.join(FRONTEND_DIR, 'index.html')));
 
 // ── Routes ──────────────────────────────────────────────────
 app.use('/api', customersRouter);          // GET /api/countries, GET /api/packages
